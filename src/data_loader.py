@@ -3,8 +3,9 @@ import numpy as np
 import os
 import kagglehub
 import sqlite3
+from typing import Optional, Dict, List, Tuple, Any
 
-def download_basketball_dataset():
+def download_basketball_dataset() -> str:
     """
     Download basketball dataset from Kaggle using kagglehub
     
@@ -18,43 +19,13 @@ def download_basketball_dataset():
     try:
         # Download latest version
         path = kagglehub.dataset_download("wyattowalsh/basketball")
-        print(f"✓ Dataset downloaded to: {path}")
+        print(f"[SUCCESS] Dataset downloaded to: {path}")
         return path
     except Exception as e:
-        print(f"✗ Error downloading dataset: {e}")
+        print(f"[ERROR] Error downloading dataset: {e}")
         raise
 
-def list_available_files(dataset_path):
-    """
-    List all files in the downloaded dataset
-    
-    Parameters:
-    -----------
-    dataset_path : str
-        Path to dataset directory
-        
-    Returns:
-    --------
-    files : list
-        List of file information dictionaries
-    """
-    print(f"\n=== FILES IN DATASET ===")
-    
-    files = []
-    for root, dirs, filenames in os.walk(dataset_path):
-        for filename in filenames:
-            filepath = os.path.join(root, filename)
-            file_size = os.path.getsize(filepath) / (1024 * 1024)  # MB
-            files.append({
-                'filename': filename,
-                'path': filepath,
-                'size_mb': round(file_size, 2)
-            })
-            print(f"  - {filename} ({file_size:.2f} MB)")
-    
-    return files
-
-def find_database(dataset_path):
+def find_database(dataset_path: str) -> Optional[str]:
     """
     Find SQLite database file in dataset
     
@@ -71,10 +42,12 @@ def find_database(dataset_path):
     for root, dirs, files in os.walk(dataset_path):
         for file in files:
             if file.endswith('.sqlite') or file.endswith('.db'):
-                return os.path.join(root, file)
+                db_path = os.path.join(root, file)
+                print(f"[SUCCESS] Found database: {db_path}")
+                return db_path
     return None
 
-def get_table_names(db_file):
+def get_table_names(db_file: str) -> List[str]:
     """
     Get list of all tables in SQLite database
     
@@ -95,62 +68,114 @@ def get_table_names(db_file):
     conn.close()
     return tables
 
-def load_from_sqlite(dataset_path, table_name=None):
+def get_table_info(db_file: str, table_name: str) -> Dict[str, Any]:
     """
-    Load data from SQLite database
+    Get information about a specific table
+    
+    Parameters:
+    -----------
+    db_file : str
+        Path to database file
+    table_name : str
+        Name of table
+        
+    Returns:
+    --------
+    info : dict
+        Dictionary with row_count and columns
+    """
+    conn = sqlite3.connect(db_file)
+    
+    # Get row count
+    count_df = pd.read_sql_query(f"SELECT COUNT(*) as count FROM {table_name}", conn)
+    row_count = count_df['count'][0]
+    
+    # Get column names
+    sample = pd.read_sql_query(f"SELECT * FROM {table_name} LIMIT 1", conn)
+    columns = sample.columns.tolist()
+    
+    conn.close()
+    
+    return {
+        'row_count': row_count,
+        'columns': columns
+    }
+
+def list_all_tables(dataset_path: str) -> Optional[Dict[str, Dict[str, Any]]]:
+    """
+    List all tables in the basketball database with details
     
     Parameters:
     -----------
     dataset_path : str
         Path to dataset directory
-    table_name : str or None
-        Specific table to load, or None to list all tables
         
     Returns:
     --------
-    df : DataFrame or list
-        Loaded data or list of table names
+    tables_info : dict or None
+        Dictionary with table information, or None if no database found
     """
-    print(f"\n=== LOADING FROM SQLITE DATABASE ===")
+    print("\n=== BASKETBALL DATABASE TABLES ===")
     
-    # Find database file
     db_file = find_database(dataset_path)
-    
     if not db_file:
-        print("✗ No SQLite database found in dataset!")
+        print("[ERROR] No database found!")
         return None
     
-    print(f"✓ Found database: {db_file}")
-    
-    # Get table names
     table_names = get_table_names(db_file)
+    tables_info: Dict[str, Dict[str, Any]] = {}
     
-    # If no specific table requested, return list of tables
-    if table_name is None:
-        conn = sqlite3.connect(db_file)
-        print(f"\nAvailable tables:")
-        for table in table_names:
-            # Get row count for each table
-            count_df = pd.read_sql_query(f"SELECT COUNT(*) as count FROM {table}", conn)
-            print(f"  - {table}: {count_df['count'][0]} rows")
-        conn.close()
-        return table_names
+    for table in table_names:
+        info = get_table_info(db_file, table)
+        tables_info[table] = info
+        print(f"  * {table:30} {info['row_count']:>8,} rows  |  {len(info['columns']):>3} columns")
     
-    # Load specific table
-    if table_name not in table_names:
-        print(f"✗ Table '{table_name}' not found!")
-        print(f"Available tables: {table_names}")
-        return None
+    return tables_info
+
+def load_table(dataset_path: str, table_name: str, limit: Optional[int] = None, 
+               where_clause: Optional[str] = None) -> pd.DataFrame:
+    """
+    Load a specific table from the database
     
-    print(f"Loading table: {table_name}")
+    Parameters:
+    -----------
+    dataset_path : str
+        Path to dataset directory
+    table_name : str
+        Name of table to load
+    limit : int or None
+        Maximum rows to load (None = all rows)
+    where_clause : str or None
+        SQL WHERE clause (e.g., "games >= 20")
+        
+    Returns:
+    --------
+    df : DataFrame
+        Loaded data
+    """
+    print(f"\n=== LOADING TABLE: {table_name} ===")
+    
+    db_file = find_database(dataset_path)
+    if not db_file:
+        raise FileNotFoundError("No database found!")
+    
+    # Build query
+    query = f"SELECT * FROM {table_name}"
+    if where_clause:
+        query += f" WHERE {where_clause}"
+    if limit:
+        query += f" LIMIT {limit}"
+    
+    print(f"SQL: {query}")
+    
     conn = sqlite3.connect(db_file)
-    df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
+    df = pd.read_sql_query(query, conn)
     conn.close()
     
-    print(f"✓ Loaded {len(df)} rows, {len(df.columns)} columns")
+    print(f"[SUCCESS] Loaded {len(df)} rows, {len(df.columns)} columns")
     return df
 
-def load_with_sql_query(dataset_path, sql_query):
+def load_with_sql_query(dataset_path: str, sql_query: str) -> pd.DataFrame:
     """
     Execute custom SQL query on the basketball database
     
@@ -166,178 +191,22 @@ def load_with_sql_query(dataset_path, sql_query):
     df : DataFrame
         Query results
     """
-    print(f"\n=== EXECUTING SQL QUERY ===")
-    print(f"Query: {sql_query[:100]}...")  # Show first 100 chars
+    print(f"\n=== EXECUTING CUSTOM SQL QUERY ===")
     
-    # Find database
     db_file = find_database(dataset_path)
-    
     if not db_file:
-        raise FileNotFoundError("No SQLite database found!")
+        raise FileNotFoundError("No database found!")
     
-    # Execute query
     conn = sqlite3.connect(db_file)
     df = pd.read_sql_query(sql_query, conn)
     conn.close()
     
-    print(f"✓ Query returned {len(df)} rows, {len(df.columns)} columns")
+    print(f"[SUCCESS] Query returned {len(df)} rows, {len(df.columns)} columns")
     return df
 
-def load_player_stats_for_ml(dataset_path, min_games=20, season=None):
+def explore_table_schema(dataset_path: str, table_name: str) -> None:
     """
-    Load and prepare player statistics specifically for ML
-    
-    Parameters:
-    -----------
-    dataset_path : str
-        Path to dataset directory
-    min_games : int
-        Minimum games played filter
-    season : int or None
-        Specific season (e.g., 2023) or None for all seasons
-        
-    Returns:
-    --------
-    df : DataFrame
-        ML-ready player statistics
-    """
-    print(f"\n=== LOADING PLAYER STATS FOR ML ===")
-    print(f"Filters: min_games={min_games}, season={season}")
-    
-    # Find database
-    db_file = find_database(dataset_path)
-    
-    if not db_file:
-        raise FileNotFoundError("No SQLite database found!")
-    
-    conn = sqlite3.connect(db_file)
-    
-    # Check which table exists
-    table_names = get_table_names(db_file)
-    
-    if 'player_season' in table_names:
-        table = 'player_season'
-        games_col = 'games'
-    elif 'Player' in table_names:
-        table = 'Player'
-        games_col = 'games'  # Adjust if different
-    else:
-        print(f"Available tables: {table_names}")
-        raise ValueError("Could not find player statistics table!")
-    
-    # Build query
-    query = f"SELECT * FROM {table} WHERE {games_col} >= {min_games}"
-    
-    if season:
-        query += f" AND season = {season}"
-    
-    print(f"SQL: {query}")
-    
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    
-    print(f"✓ Loaded {len(df)} player-seasons")
-    return df
-
-def load_basketball_data_complete(use_cached=True):
-    """
-    Complete data loading pipeline:
-    1. Download from Kaggle
-    2. Find and connect to database
-    3. Load player statistics for ML
-    
-    Parameters:
-    -----------
-    use_cached : bool
-        If True, use previously downloaded data if available
-        
-    Returns:
-    --------
-    tuple : (DataFrame, str)
-        - DataFrame: Complete basketball dataset ready for ML
-        - str: Path to the downloaded dataset
-    """
-    print("=== COMPLETE BASKETBALL DATA LOADING ===\n")
-    
-    # Step 1: Download dataset
-    dataset_path = download_basketball_dataset()
-    
-    # Step 2: List available files
-    files = list_available_files(dataset_path)
-    
-    # Step 3: Find database
-    db_file = find_database(dataset_path)
-    if not db_file:
-        raise FileNotFoundError("No SQLite database found in dataset!")
-    
-    print(f"\n✓ Found database: {db_file}")
-    
-    # Step 4: Get available tables
-    table_names = get_table_names(db_file)
-    print(f"\n=== AVAILABLE TABLES ===")
-    
-    conn = sqlite3.connect(db_file)
-    for table in table_names:
-        count_df = pd.read_sql_query(f"SELECT COUNT(*) as count FROM {table}", conn)
-        print(f"  - {table}: {count_df['count'][0]} rows")
-    
-    # Step 5: Load best table for ML
-    df = None
-    preferred_tables = ['player_season', 'Player', 'player', 'players']
-    
-    for table_name in preferred_tables:
-        if table_name in table_names:
-            print(f"\n=== LOADING TABLE: {table_name} ===")
-            
-            # Test query first
-            try:
-                test_query = f"SELECT * FROM {table_name} LIMIT 5"
-                test_df = pd.read_sql_query(test_query, conn)
-                print(f"✓ Test successful: {len(test_df.columns)} columns")
-                
-                # Load with filter if it's player_season
-                if table_name == 'player_season':
-                    # Check if 'games' column exists
-                    if 'games' in test_df.columns:
-                        query = f"SELECT * FROM {table_name} WHERE games >= 20"
-                        print(f"  Applying filter: games >= 20")
-                    else:
-                        query = f"SELECT * FROM {table_name}"
-                else:
-                    query = f"SELECT * FROM {table_name}"
-                
-                df = pd.read_sql_query(query, conn)
-                print(f"✓ Loaded {len(df)} rows, {len(df.columns)} columns")
-                break
-                
-            except Exception as e:
-                print(f"✗ Error loading {table_name}: {e}")
-                continue
-    
-    conn.close()
-    
-    # Fallback to first table if nothing worked
-    if df is None and len(table_names) > 0:
-        print(f"\n⚠ Loading first available table: {table_names[0]}")
-        conn = sqlite3.connect(db_file)
-        df = pd.read_sql_query(f"SELECT * FROM {table_names[0]}", conn)
-        conn.close()
-    
-    if df is None:
-        raise ValueError("Could not load any data from database!")
-    
-    print(f"\n{'='*50}")
-    print(f"✓ DATASET LOADED SUCCESSFULLY!")
-    print(f"{'='*50}")
-    print(f"Shape: {df.shape[0]} rows × {df.shape[1]} columns")
-    print(f"Columns: {list(df.columns)[:10]}...")
-    print(f"Memory usage: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
-    
-    return df, dataset_path
-
-def explore_table_schema(dataset_path, table_name):
-    """
-    Show column information for a specific table
+    Show detailed schema for a specific table
     
     Parameters:
     -----------
@@ -346,33 +215,197 @@ def explore_table_schema(dataset_path, table_name):
     table_name : str
         Table to explore
     """
-    print(f"\n=== SCHEMA FOR TABLE: {table_name} ===")
+    print(f"\n{'='*70}")
+    print(f"SCHEMA FOR TABLE: {table_name}")
+    print(f"{'='*70}")
     
     db_file = find_database(dataset_path)
     if not db_file:
-        print("✗ No database found!")
+        print("[ERROR] No database found!")
         return
     
     conn = sqlite3.connect(db_file)
     
-    # Get table info
+    # Get table schema
     cursor = conn.cursor()
     cursor.execute(f"PRAGMA table_info({table_name})")
     schema = cursor.fetchall()
     
-    print(f"\nColumns in {table_name}:")
+    print("\nColumns:")
+    print(f"{'Name':<30} {'Type':<15} {'Nullable':<10} {'Default':<15} {'PK':<5}")
+    print("-" * 80)
     for col in schema:
-        pk_marker = " [PRIMARY KEY]" if col[5] else ""
-        print(f"  {col[1]:30} {col[2]:15}{pk_marker}")
+        col_name = col[1]
+        col_type = col[2]
+        not_null = "NO" if col[3] else "YES"
+        default_val = col[4] if col[4] else ""
+        is_pk = "YES" if col[5] else ""
+        print(f"{col_name:<30} {col_type:<15} {not_null:<10} {str(default_val):<15} {is_pk:<5}")
     
-    # Sample data
-    print(f"\nSample rows:")
+    # Get sample data
+    print(f"\n{'='*70}")
+    print("SAMPLE DATA (first 5 rows):")
+    print(f"{'='*70}")
     sample = pd.read_sql_query(f"SELECT * FROM {table_name} LIMIT 5", conn)
-    print(sample)
+    print(sample.to_string())
+    
+    # Get statistics
+    print(f"\n{'='*70}")
+    print("STATISTICS:")
+    print(f"{'='*70}")
+    count = pd.read_sql_query(f"SELECT COUNT(*) as count FROM {table_name}", conn)
+    print(f"Total rows: {count['count'][0]:,}")
     
     conn.close()
 
-def get_dataset_info(df):
+def load_basketball_data_complete(min_games: int = 20, 
+                                  season: Optional[int] = None) -> Tuple[pd.DataFrame, str]:
+    """
+    Complete data loading pipeline - automatically finds and loads best table
+    
+    Parameters:
+    -----------
+    min_games : int
+        Minimum games played filter (default: 20)
+    season : int or None
+        Specific season to load (e.g., 2023), None for all seasons
+        
+    Returns:
+    --------
+    tuple : (DataFrame, str)
+        - DataFrame: Player statistics ready for ML
+        - str: Path to the downloaded dataset
+    """
+    print("\n" + "="*70)
+    print("NBA PLAYER PERFORMANCE PREDICTION - DATA LOADING")
+    print("="*70)
+    
+    # Step 1: Download dataset
+    dataset_path = download_basketball_dataset()
+    
+    # Step 2: Find database
+    db_file = find_database(dataset_path)
+    if not db_file:
+        raise FileNotFoundError("No SQLite database found in dataset!")
+    
+    # Step 3: List all tables
+    tables_info = list_all_tables(dataset_path)
+    
+    # Check if tables_info is valid (type checking fix)
+    if tables_info is None:
+        raise ValueError("No tables found in database!")
+    
+    if len(tables_info) == 0:
+        raise ValueError("Database contains no tables!")
+    
+    # Step 4: Try to find the best table for player statistics
+    conn = sqlite3.connect(db_file)
+    table_names = list(tables_info.keys())
+    
+    # Priority order - most datasets use these names
+    preferred_tables = [
+        'player_season',      # Most common
+        'Player_Attributes',  # Some datasets
+        'Player',            # Generic name
+        'players',           # Lowercase variant
+        'player_stats'       # Alternative
+    ]
+    
+    df: Optional[pd.DataFrame] = None
+    loaded_table: Optional[str] = None
+    
+    print("\n" + "="*70)
+    print("FINDING BEST TABLE FOR ML...")
+    print("="*70)
+    
+    for table_name in preferred_tables:
+        if table_name in table_names:
+            print(f"\n[SUCCESS] Found '{table_name}' table - attempting to load...")
+            
+            try:
+                # Test query to check columns
+                test_query = f"SELECT * FROM {table_name} LIMIT 1"
+                test_df = pd.read_sql_query(test_query, conn)
+                
+                print(f"  Columns: {list(test_df.columns)[:10]}...")
+                
+                # Build filtered query
+                query = f"SELECT * FROM {table_name}"
+                filters: List[str] = []
+                
+                # Check for games column (various names)
+                games_cols = ['games', 'gp', 'G', 'games_played']
+                games_col: Optional[str] = None
+                for col in games_cols:
+                    if col in test_df.columns:
+                        games_col = col
+                        break
+                
+                if games_col:
+                    filters.append(f"{games_col} >= {min_games}")
+                    print(f"  [FILTER] Applying filter: {games_col} >= {min_games}")
+                
+                # Check for season column
+                season_cols = ['season', 'year', 'season_id']
+                season_col: Optional[str] = None
+                for col in season_cols:
+                    if col in test_df.columns:
+                        season_col = col
+                        break
+                
+                if season and season_col:
+                    filters.append(f"{season_col} = {season}")
+                    print(f"  [FILTER] Applying filter: {season_col} = {season}")
+                
+                # Add filters to query
+                if filters:
+                    query += " WHERE " + " AND ".join(filters)
+                
+                print(f"\n  Executing: {query}")
+                
+                # Load data
+                df = pd.read_sql_query(query, conn)
+                loaded_table = table_name
+                
+                print(f"\n  [SUCCESS] Loaded {len(df)} rows from '{table_name}'")
+                break
+                
+            except Exception as e:
+                print(f"  [ERROR] Error loading '{table_name}': {e}")
+                continue
+    
+    # If no preferred table found, load first table with most rows
+    if df is None:
+        print("\n[WARNING] No preferred table found. Loading largest table...")
+        
+        # Find largest table
+        largest_table = max(tables_info.items(), key=lambda x: x[1]['row_count'])
+        loaded_table = largest_table[0]
+        
+        print(f"[INFO] Attempting to load '{loaded_table}'...")
+        df = pd.read_sql_query(f"SELECT * FROM {loaded_table}", conn)
+        print(f"[SUCCESS] Loaded '{loaded_table}' with {len(df)} rows")
+    
+    conn.close()
+    
+    # Final check (type checking fix)
+    if df is None or len(df) == 0:
+        raise ValueError("Failed to load any data from database!")
+    
+    # Final summary
+    print("\n" + "="*70)
+    print("[SUCCESS] DATA LOADING COMPLETE!")
+    print("="*70)
+    print(f"Dataset path: {dataset_path}")
+    print(f"Database: {os.path.basename(db_file)}")
+    print(f"Table loaded: {loaded_table}")
+    print(f"Shape: {df.shape[0]:,} rows x {df.shape[1]} columns")
+    print(f"Memory: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+    print(f"\nFirst 10 columns: {list(df.columns)[:10]}")
+    
+    return df, dataset_path
+
+def get_dataset_info(df: pd.DataFrame) -> None:
     """
     Print comprehensive information about the dataset
     
@@ -381,22 +414,43 @@ def get_dataset_info(df):
     df : DataFrame
         Basketball dataset
     """
-    print("\n=== DATASET INFORMATION ===")
-    print(f"Total samples: {len(df)}")
-    print(f"Total features: {len(df.columns)}")
-    print(f"\nColumn names:\n{df.columns.tolist()}")
-    print(f"\nData types:\n{df.dtypes}")
-    print(f"\nMissing values:\n{df.isnull().sum()[df.isnull().sum() > 0]}")
-    print(f"\nBasic statistics:\n{df.describe()}")
+    print("\n" + "="*70)
+    print("DATASET INFORMATION")
+    print("="*70)
+    
+    print(f"\nShape: {df.shape[0]:,} rows x {df.shape[1]} columns")
+    
+    print("\n--- Data Types ---")
+    print(df.dtypes.value_counts())
+    
+    print("\n--- Missing Values ---")
+    missing = df.isnull().sum()
+    if missing.sum() > 0:
+        missing_df = missing[missing > 0].sort_values(ascending=False)
+        print(missing_df)
+    else:
+        print("[SUCCESS] No missing values!")
+    
+    print("\n--- Numeric Columns Summary ---")
+    print(df.describe())
+    
+    print("\n--- Sample Data ---")
+    print(df.head(3))
 
-# Example usage (commented out - uncomment to test)
+# Test function
 if __name__ == "__main__":
-    print("Testing data loader...")
+    print("Testing basketball data loader...\n")
     try:
-        df, path = load_basketball_data_complete()
-        print("\n✓ Test successful!")
-        print(f"First few rows:\n{df.head()}")
+        df, path = load_basketball_data_complete(min_games=20)
+        print("\n" + "="*70)
+        print("[SUCCESS] TEST SUCCESSFUL!")
+        print("="*70)
+        print(f"\nDataset ready for analysis!")
+        print(f"Columns: {list(df.columns)}")
     except Exception as e:
-        print(f"\n✗ Test failed: {e}")
+        print("\n" + "="*70)
+        print("[ERROR] TEST FAILED")
+        print("="*70)
+        print(f"Error: {e}")
         import traceback
         traceback.print_exc()
