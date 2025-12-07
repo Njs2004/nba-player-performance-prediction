@@ -259,9 +259,11 @@ def explore_table_schema(dataset_path: str, table_name: str) -> None:
     conn.close()
 
 def load_basketball_data_complete(min_games: int = 20, 
-                                  season: Optional[int] = None) -> Tuple[pd.DataFrame, str]:
+                                  season: Optional[int] = None,
+                                  max_rows: int = 50000) -> Tuple[pd.DataFrame, str]:
     """
     Complete data loading pipeline - automatically finds and loads best table
+    OPTIMIZED FOR MACBOOK AIR - Skips huge tables like play-by-play
     
     Parameters:
     -----------
@@ -269,6 +271,8 @@ def load_basketball_data_complete(min_games: int = 20,
         Minimum games played filter (default: 20)
     season : int or None
         Specific season to load (e.g., 2023), None for all seasons
+    max_rows : int
+        Skip tables with more than this many rows (default: 50,000)
         
     Returns:
     --------
@@ -278,6 +282,7 @@ def load_basketball_data_complete(min_games: int = 20,
     """
     print("\n" + "="*70)
     print("NBA PLAYER PERFORMANCE PREDICTION - DATA LOADING")
+    print("(MacBook Air Optimized - Skipping Large Tables)")
     print("="*70)
     
     # Step 1: Download dataset
@@ -291,24 +296,46 @@ def load_basketball_data_complete(min_games: int = 20,
     # Step 3: List all tables
     tables_info = list_all_tables(dataset_path)
     
-    # Check if tables_info is valid (type checking fix)
+    # Check if tables_info is valid
     if tables_info is None:
         raise ValueError("No tables found in database!")
     
     if len(tables_info) == 0:
         raise ValueError("Database contains no tables!")
     
+    # Filter out HUGE tables (like play-by-play)
+    print(f"\n[OPTIMIZATION] Filtering tables for MacBook Air...")
+    print(f"[OPTIMIZATION] Skipping tables with > {max_rows:,} rows")
+    
+    filtered_tables = {}
+    skipped_tables = []
+    
+    for table_name, info in tables_info.items():
+        if info['row_count'] > max_rows:
+            skipped_tables.append((table_name, info['row_count']))
+            print(f"  [SKIP] {table_name}: {info['row_count']:,} rows (too large)")
+        else:
+            filtered_tables[table_name] = info
+            print(f"  [OK] {table_name}: {info['row_count']:,} rows")
+    
+    if len(filtered_tables) == 0:
+        raise ValueError("All tables are too large! Try increasing max_rows parameter.")
+    
+    print(f"\n[INFO] Using {len(filtered_tables)} tables, skipped {len(skipped_tables)}")
+    
     # Step 4: Try to find the best table for player statistics
     conn = sqlite3.connect(db_file)
-    table_names = list(tables_info.keys())
+    table_names = list(filtered_tables.keys())
     
     # Priority order - most datasets use these names
     preferred_tables = [
-        'player_season',      # Most common
+        'player_season',      # Most common - perfect for ML
+        'player',             # Player info
+        'Player',             # Alternative name
+        'players',            # Lowercase variant
+        'player_stats',       # Alternative
         'Player_Attributes',  # Some datasets
-        'Player',            # Generic name
-        'players',           # Lowercase variant
-        'player_stats'       # Alternative
+        'team_season',        # Backup: team stats (smaller)
     ]
     
     df: Optional[pd.DataFrame] = None
@@ -328,6 +355,7 @@ def load_basketball_data_complete(min_games: int = 20,
                 test_df = pd.read_sql_query(test_query, conn)
                 
                 print(f"  Columns: {list(test_df.columns)[:10]}...")
+                print(f"  Table size: {filtered_tables[table_name]['row_count']:,} rows")
                 
                 # Build filtered query
                 query = f"SELECT * FROM {table_name}"
@@ -361,36 +389,49 @@ def load_basketball_data_complete(min_games: int = 20,
                 if filters:
                     query += " WHERE " + " AND ".join(filters)
                 
-                print(f"\n  Executing: {query}")
+                # Add LIMIT as safety for MacBook Air
+                estimated_rows = filtered_tables[table_name]['row_count']
+                if estimated_rows > 30000:
+                    query += f" LIMIT 30000"
+                    print(f"  [SAFETY] Adding LIMIT 30000 for memory safety")
+                
+                print(f"\n  Executing: {query[:100]}...")
                 
                 # Load data
                 df = pd.read_sql_query(query, conn)
                 loaded_table = table_name
                 
-                print(f"\n  [SUCCESS] Loaded {len(df)} rows from '{table_name}'")
+                print(f"\n  [SUCCESS] Loaded {len(df):,} rows from '{table_name}'")
+                print(f"  [MEMORY] Estimated size: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
                 break
                 
             except Exception as e:
                 print(f"  [ERROR] Error loading '{table_name}': {e}")
                 continue
     
-    # If no preferred table found, load first table with most rows
+    # If no preferred table found, load smallest table
     if df is None:
-        print("\n[WARNING] No preferred table found. Loading largest table...")
+        print("\n[WARNING] No preferred table found. Loading smallest available table...")
         
-        # Find largest table
-        largest_table = max(tables_info.items(), key=lambda x: x[1]['row_count'])
-        loaded_table = largest_table[0]
+        # Find smallest table
+        smallest_table = min(filtered_tables.items(), key=lambda x: x[1]['row_count'])
+        loaded_table = smallest_table[0]
         
-        print(f"[INFO] Attempting to load '{loaded_table}'...")
-        df = pd.read_sql_query(f"SELECT * FROM {loaded_table}", conn)
-        print(f"[SUCCESS] Loaded '{loaded_table}' with {len(df)} rows")
+        print(f"[INFO] Attempting to load '{loaded_table}' ({smallest_table[1]['row_count']:,} rows)")
+        df = pd.read_sql_query(f"SELECT * FROM {loaded_table} LIMIT 30000", conn)
+        print(f"[SUCCESS] Loaded '{loaded_table}' with {len(df):,} rows")
     
     conn.close()
     
-    # Final check (type checking fix)
+    # Final check
     if df is None or len(df) == 0:
         raise ValueError("Failed to load any data from database!")
+    
+    # Memory check
+    memory_mb = df.memory_usage(deep=True).sum() / 1024**2
+    if memory_mb > 500:
+        print(f"\n[WARNING] Dataset is large ({memory_mb:.2f} MB)")
+        print(f"[WARNING] Consider using a specific season or reducing features")
     
     # Final summary
     print("\n" + "="*70)
@@ -400,11 +441,15 @@ def load_basketball_data_complete(min_games: int = 20,
     print(f"Database: {os.path.basename(db_file)}")
     print(f"Table loaded: {loaded_table}")
     print(f"Shape: {df.shape[0]:,} rows x {df.shape[1]} columns")
-    print(f"Memory: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+    print(f"Memory: {memory_mb:.2f} MB")
     print(f"\nFirst 10 columns: {list(df.columns)[:10]}")
     
+    if len(skipped_tables) > 0:
+        print(f"\n[INFO] Skipped {len(skipped_tables)} large tables:")
+        for table, rows in skipped_tables[:3]:
+            print(f"  - {table}: {rows:,} rows")
+    
     return df, dataset_path
-
 def get_dataset_info(df: pd.DataFrame) -> None:
     """
     Print comprehensive information about the dataset
